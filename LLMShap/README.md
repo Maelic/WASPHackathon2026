@@ -1,4 +1,6 @@
-![llmSHAP banner](resources/banner.png)
+<p align="center">
+  <img src="resources/banner.png" alt="llmSHAP banner" width="60%" />
+</p>
 
 # llmSHAP
 
