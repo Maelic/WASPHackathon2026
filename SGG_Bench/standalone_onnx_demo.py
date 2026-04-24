@@ -4,90 +4,8 @@ import os
 import cv2
 import json
 import argparse
-import ctypes
-import glob
-import site
-
-
-def _preload_cuda_libs():
-    """Preload CUDA/cuDNN shared libs from the venv into the process global
-    symbol table (RTLD_GLOBAL) so that onnxruntime's dlopen can find them.
-
-    This is the most reliable approach: once a library is in the global table
-    it is found by any subsequent dlopen, regardless of LD_LIBRARY_PATH.
-    """
-    site_dirs = list(site.getsitepackages())
-    if hasattr(site, 'getusersitepackages'):
-        try:
-            site_dirs.append(site.getusersitepackages())
-        except Exception:
-            pass
-
-    # Collect every nvidia sub-package lib dir
-    lib_dirs = []
-    for pkg in site_dirs:
-        if not os.path.exists(pkg):
-            continue
-        nvidia = os.path.join(pkg, 'nvidia')
-        if os.path.exists(nvidia):
-            for sub in sorted(os.listdir(nvidia)):
-                lib_dir = os.path.join(nvidia, sub, 'lib')
-                if os.path.exists(lib_dir):
-                    lib_dirs.append(lib_dir)
-        # Also grab *_libs / *.libs wheels (e.g. nvidia_cublas_cu12-*.libs)
-        for item in os.listdir(pkg):
-            if item.endswith('_libs') or item.endswith('.libs'):
-                lib_dirs.append(os.path.join(pkg, item))
-
-    if not lib_dirs:
-        return  # nothing found, give up silently
-
-    # Update LD_LIBRARY_PATH so child processes also benefit
-    current_ld = os.environ.get('LD_LIBRARY_PATH', '')
-    new_ld = ':'.join(dict.fromkeys(lib_dirs))
-    os.environ['LD_LIBRARY_PATH'] = f"{new_ld}:{current_ld}" if current_ld else new_ld
-
-    # Load priority order: cublas → cudnn (cudnn depends on cublas)
-    priority_patterns = [
-        'libcublas.so.*',
-        'libcublasLt.so.*',
-        'libcudart.so.*',
-        'libcudnn.so.*',
-    ]
-
-    # Build an ordered load list: priority libs first, then everything else
-    ordered = []
-    other = []
-    for lib_dir in lib_dirs:
-        for pat in priority_patterns:
-            for path in sorted(glob.glob(os.path.join(lib_dir, pat))):
-                if path not in ordered:
-                    ordered.append(path)
-        for path in sorted(glob.glob(os.path.join(lib_dir, 'lib*.so*'))):
-            if path not in ordered and path not in other:
-                other.append(path)
-
-    loaded, failed = [], []
-    for path in ordered + other:
-        # Skip version-symlinks that point to already-loaded files
-        real = os.path.realpath(path)
-        if real in [os.path.realpath(p) for p in loaded]:
-            continue
-        try:
-            ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
-            loaded.append(path)
-        except OSError:
-            failed.append(path)
-
-    if loaded:
-        print(f"[cuda preload] Loaded {len(loaded)} CUDA libs from venv.")
-    if failed:
-        print(f"[cuda preload] Could not load {len(failed)} libs (may be normal): "
-              + ', '.join(os.path.basename(p) for p in failed[:5]))
-
 
 import onnxruntime as ort  # noqa: E402 – must be after preload definition
-
 
 class SGG_ONNX_Standalone:
     def __init__(self, onnx_path, provider='CUDAExecutionProvider', rel_conf=0.1, box_conf=0.5):
@@ -96,8 +14,6 @@ class SGG_ONNX_Standalone:
         self.onnx_path = onnx_path
         self.provider = provider
 
-        # 1. Pre-load CUDA libs so onnxruntime can find libcudnn etc.
-        _preload_cuda_libs()
         print(f"Loading ONNX model from {onnx_path} with {provider}...")
         self.session = self._build_session(provider)
         print(f"Active providers: {self.session.get_providers()}")
@@ -146,7 +62,7 @@ class SGG_ONNX_Standalone:
         img = np.ascontiguousarray(img).astype(np.float32) / 255.0
         return img[None, ...], r, (left, top)
 
-    def predict(self, frame, visualize=False):
+    def predict(self, frame, visualize=False, rel_conf=None, box_conf=None):
         # Preprocess
         img_input, ratio, (pad_x, pad_y) = self.preprocess(frame)
         
@@ -212,7 +128,7 @@ class SGG_ONNX_Standalone:
             rel_name = self.rel_classes.get(rel_id, '?')
             full_rels.append(f"{s_idx}_{s_cls_name} - {rel_name} - {o_idx}_{o_cls_name}: (triplet_score={triplet_score:.2f}, rel_score={rel_score:.2f})")
         
-        if self.visualize and len(final_boxes) > 0:
+        if visualize and len(final_boxes) > 0:
             vis = self.visualize(frame.copy(), final_boxes, np.array(final_rels))
 
         return final_boxes, np.array(final_rels), full_rels, vis if self.visualize else None
